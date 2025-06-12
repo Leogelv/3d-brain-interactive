@@ -3,10 +3,15 @@
   "version": "1.0.0",
   "description": "Interactive 3D brain visualization with particle effects using Three.js and React",
   "main": "index.html",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "dev": "python3 -m http.server 3000 || python -m http.server 3000",
     "serve": "python3 -m http.server 3000 || python -m http.server 3000",
-    "preview": "python3 -m http.server 3000 || python -m http.server 3000"
+    "preview": "python3 -m http.server 3000 || python -m http.server 3000",
+    "build": "echo 'No build step needed for static site'",
+    "start": "echo 'Static site, no start command needed'"
   },
   "keywords": [
     "three.js",
