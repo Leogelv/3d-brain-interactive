@@ -2,18 +2,21 @@ import React, { useRef, useEffect, useState } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 
-const PUSH_STRENGTH = 2.5
-const MAGNETIC_FORCE = 0.15
-const FRICTION = 0.98
-const INTERACTION_RADIUS = 2.0
-const DEPTH_FACTOR = 0.8 // Усиливает эффект для частиц ближе к камере
+// Параметры физики
+const WAVE_STRENGTH = 3.0
+const WAVE_SPEED = 0.15
+const MAGNETIC_FORCE = 0.08
+const FRICTION = 0.92
+const INTERACTION_RADIUS = 2.5
+const SWIRL_STRENGTH = 0.3
+const TURBULENCE = 0.4
 
 interface ParticlePhysics {
   velocity: THREE.Vector3
-  force: THREE.Vector3
-  isAffected: boolean
   originalPosition: THREE.Vector3
-  depth: number // расстояние от камеры
+  offset: THREE.Vector3
+  wavePhase: number
+  turbulence: THREE.Vector3
 }
 
 const App: React.FC = () => {
@@ -29,112 +32,79 @@ const App: React.FC = () => {
   const brainMeshRef = useRef<THREE.Mesh | null>(null)
   const originalPositionsRef = useRef<THREE.BufferAttribute | null>(null)
   const particlePhysicsRef = useRef<Map<number, ParticlePhysics>>(new Map())
+  
+  // Состояние взаимодействия
   const isInteractingRef = useRef(false)
-  const lastInteractionPointRef = useRef<THREE.Vector3 | null>(null)
+  const mousePositionRef = useRef(new THREE.Vector2())
+  const previousMousePositionRef = useRef(new THREE.Vector2())
+  const mouseVelocityRef = useRef(new THREE.Vector2())
+  const interactionPointRef = useRef<THREE.Vector3 | null>(null)
+  const waveTimeRef = useRef(0)
 
-  // Функция для вычисления глубины частицы относительно камеры
-  const calculateParticleDepth = (position: THREE.Vector3, camera: THREE.Camera): number => {
-    const worldPosition = position.clone()
-    const cameraPosition = camera.position
-    return worldPosition.distanceTo(cameraPosition)
-  }
-
-  // Функция для обработки взаимодействия (мышь или touch)
-  const handleInteraction = (clientX: number, clientY: number, isStart: boolean = true) => {
-    if (!mountRef.current || !cameraRef.current || !brainMeshRef.current || !originalPositionsRef.current || !rendererRef.current) {
-      return
-    }
+  // Функция для получения 3D позиции из экранных координат
+  const getWorldPosition = (clientX: number, clientY: number): THREE.Vector3 | null => {
+    if (!mountRef.current || !cameraRef.current || !brainMeshRef.current) return null
     
-    // Проверяем что модель загружена
-    if (isLoading || loadingError) {
-      return
-    }
-    
-    // Получаем координаты относительно canvas элемента
-    const canvas = rendererRef.current.domElement
-    const rect = canvas.getBoundingClientRect()
+    const rect = mountRef.current.getBoundingClientRect()
     const mouse = new THREE.Vector2()
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1
     
     const raycaster = new THREE.Raycaster()
     raycaster.setFromCamera(mouse, cameraRef.current)
-
+    
     const intersects = raycaster.intersectObject(brainMeshRef.current)
+    
+    if (intersects.length > 0) {
+      return intersects[0].point
+    }
+    
+    // Если не попали в мозг, проецируем на плоскость
+    const planeNormal = new THREE.Vector3(0, 0, 1)
+    const planePoint = new THREE.Vector3(0, 0, 0)
+    const plane = new THREE.Plane(planeNormal, -planePoint.dot(planeNormal))
+    
+    const intersection = new THREE.Vector3()
+    raycaster.ray.intersectPlane(plane, intersection)
+    
+    return intersection
+  }
 
-    if (intersects.length > 0 && isStart) {
-      isInteractingRef.current = true
-      const intersection = intersects[0]
-      const hitWorldPosition = intersection.point
-      lastInteractionPointRef.current = hitWorldPosition.clone()
-
-      // Преобразуем мировую позицию в локальную позицию модели
-      const brainGroup = brainMeshRef.current.parent
-      if (brainGroup) {
-        const localHitPosition = brainGroup.worldToLocal(hitWorldPosition.clone())
-        
-        // Применяем физику ко всем частицам
-        for (let i = 0; i < originalPositionsRef.current.count; i++) {
-          const originalPos = new THREE.Vector3().fromBufferAttribute(originalPositionsRef.current, i)
-          const distance = originalPos.distanceTo(localHitPosition)
-          
-          if (distance < INTERACTION_RADIUS) {
-            // Вычисляем глубину частицы
-            const worldParticlePos = brainGroup.localToWorld(originalPos.clone())
-            const depth = calculateParticleDepth(worldParticlePos, cameraRef.current)
-            
-            // Направление от точки удара к частице
-            let direction = originalPos.clone().sub(localHitPosition)
-            if (direction.lengthSq() === 0) {
-              direction.set(
-                (Math.random() - 0.5) * 2,
-                (Math.random() - 0.5) * 2,
-                (Math.random() - 0.5) * 2
-              )
-            }
-            direction.normalize()
-            
-            // Сила зависит от расстояния и глубины
-            const distanceFactor = 1 - (distance / INTERACTION_RADIUS)
-            const depthFactor = Math.max(0.3, 1 - (depth * DEPTH_FACTOR / 10))
-            const finalStrength = PUSH_STRENGTH * distanceFactor * depthFactor
-            
-            // Добавляем случайность для более органичного эффекта
-            const randomness = new THREE.Vector3(
-              (Math.random() - 0.5) * 0.3,
-              (Math.random() - 0.5) * 0.3,
-              (Math.random() - 0.5) * 0.3
-            )
-            direction.add(randomness).normalize()
-            
-            const force = direction.multiplyScalar(finalStrength)
-            
-            // Получаем или создаем физику для частицы
-            let physics = particlePhysicsRef.current.get(i)
-            if (!physics) {
-              physics = {
-                velocity: new THREE.Vector3(),
-                force: new THREE.Vector3(),
-                isAffected: false,
-                originalPosition: originalPos.clone(),
-                depth: depth
-              }
-              particlePhysicsRef.current.set(i, physics)
-            }
-            
-            // Применяем силу
-            physics.force.add(force)
-            physics.isAffected = true
-            physics.depth = depth
-          }
-        }
-      }
+  // Обработка начала взаимодействия
+  const handleInteractionStart = (clientX: number, clientY: number) => {
+    isInteractingRef.current = true
+    mousePositionRef.current.set(clientX, clientY)
+    previousMousePositionRef.current.set(clientX, clientY)
+    
+    const worldPos = getWorldPosition(clientX, clientY)
+    if (worldPos) {
+      interactionPointRef.current = worldPos
+      waveTimeRef.current = 0
     }
   }
 
+  // Обработка движения
+  const handleInteractionMove = (clientX: number, clientY: number) => {
+    if (!isInteractingRef.current) return
+    
+    // Вычисляем скорость движения мыши
+    const deltaX = clientX - previousMousePositionRef.current.x
+    const deltaY = clientY - previousMousePositionRef.current.y
+    
+    mouseVelocityRef.current.set(deltaX * 0.1, -deltaY * 0.1)
+    previousMousePositionRef.current.set(clientX, clientY)
+    mousePositionRef.current.set(clientX, clientY)
+    
+    const worldPos = getWorldPosition(clientX, clientY)
+    if (worldPos) {
+      interactionPointRef.current = worldPos
+    }
+  }
+
+  // Обработка конца взаимодействия
   const handleInteractionEnd = () => {
     isInteractingRef.current = false
-    lastInteractionPointRef.current = null
+    mouseVelocityRef.current.set(0, 0)
   }
 
   const loadModel = async () => {
@@ -156,6 +126,22 @@ const App: React.FC = () => {
           if (!brainMeshRef.current) {
             brainMeshRef.current = child
             originalPositionsRef.current = child.geometry.attributes.position.clone()
+            
+            // Инициализируем физику для каждой частицы
+            for (let i = 0; i < originalPositionsRef.current!.count; i++) {
+              const originalPos = new THREE.Vector3().fromBufferAttribute(originalPositionsRef.current!, i)
+              particlePhysicsRef.current.set(i, {
+                velocity: new THREE.Vector3(),
+                originalPosition: originalPos.clone(),
+                offset: new THREE.Vector3(),
+                wavePhase: Math.random() * Math.PI * 2,
+                turbulence: new THREE.Vector3(
+                  (Math.random() - 0.5) * 0.1,
+                  (Math.random() - 0.5) * 0.1,
+                  (Math.random() - 0.5) * 0.1
+                )
+              })
+            }
           }
         }
       })
@@ -165,9 +151,8 @@ const App: React.FC = () => {
         const center = box.getCenter(new THREE.Vector3())
         modelGroup.position.sub(center)
 
-        // Позиционирование мозга для мобильных устройств
         if (isMobile) {
-          modelGroup.position.y = 0.3 // Чуть выше центра
+          modelGroup.position.y = 0.3
         }
 
         sceneRef.current.add(modelGroup)
@@ -191,7 +176,6 @@ const App: React.FC = () => {
   }
 
   useEffect(() => {
-    // Определение мобильного устройства
     const checkIsMobile = () => {
       const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera
       const mobileRegex = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i
@@ -216,17 +200,22 @@ const App: React.FC = () => {
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.setSize(currentMount.clientWidth, currentMount.clientHeight)
     renderer.setPixelRatio(window.devicePixelRatio)
-    renderer.domElement.style.touchAction = 'none' // Предотвращаем стандартные touch действия
+    renderer.domElement.style.touchAction = 'none'
     currentMount.appendChild(renderer.domElement)
     rendererRef.current = renderer
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 1.5)
     scene.add(ambientLight)
     
-    // Обработчики событий мыши
+    // События мыши
     const onMouseDown = (event: MouseEvent) => {
       event.preventDefault()
-      handleInteraction(event.clientX, event.clientY, true)
+      handleInteractionStart(event.clientX, event.clientY)
+    }
+
+    const onMouseMove = (event: MouseEvent) => {
+      event.preventDefault()
+      handleInteractionMove(event.clientX, event.clientY)
     }
 
     const onMouseUp = (event: MouseEvent) => {
@@ -234,12 +223,20 @@ const App: React.FC = () => {
       handleInteractionEnd()
     }
 
-    // Обработчики touch событий
+    // Touch события
     const onTouchStart = (event: TouchEvent) => {
       event.preventDefault()
       if (event.touches.length > 0) {
         const touch = event.touches[0]
-        handleInteraction(touch.clientX, touch.clientY, true)
+        handleInteractionStart(touch.clientX, touch.clientY)
+      }
+    }
+
+    const onTouchMove = (event: TouchEvent) => {
+      event.preventDefault()
+      if (event.touches.length > 0) {
+        const touch = event.touches[0]
+        handleInteractionMove(touch.clientX, touch.clientY)
       }
     }
 
@@ -248,12 +245,14 @@ const App: React.FC = () => {
       handleInteractionEnd()
     }
 
-    // Добавляем события на canvas сразу
-    const canvas = renderer.domElement
-    canvas.addEventListener('mousedown', onMouseDown)
-    canvas.addEventListener('mouseup', onMouseUp)
-    canvas.addEventListener('touchstart', onTouchStart, { passive: false })
-    canvas.addEventListener('touchend', onTouchEnd, { passive: false })
+    // Добавляем слушатели событий
+    currentMount.addEventListener('mousedown', onMouseDown)
+    currentMount.addEventListener('mousemove', onMouseMove)
+    currentMount.addEventListener('mouseup', onMouseUp)
+    currentMount.addEventListener('mouseleave', handleInteractionEnd)
+    currentMount.addEventListener('touchstart', onTouchStart, { passive: false })
+    currentMount.addEventListener('touchmove', onTouchMove, { passive: false })
+    currentMount.addEventListener('touchend', onTouchEnd, { passive: false })
 
     const animate = () => {
       animationIdRef.current = requestAnimationFrame(animate)
@@ -265,57 +264,82 @@ const App: React.FC = () => {
         brainGroup.rotation.y += 0.003
       }
 
-      if (brainMesh && originalPositionsRef.current) {
+      if (brainMesh && originalPositionsRef.current && brainGroup) {
         const currentPositionAttribute = brainMesh.geometry.attributes.position
         let needsUpdate = false
         
-        // Физическое обновление для каждой частицы
+        // Увеличиваем время волны
+        if (isInteractingRef.current) {
+          waveTimeRef.current += 0.1
+        }
+        
+        // Обновляем физику каждой частицы
         for (let i = 0; i < currentPositionAttribute.count; i++) {
           const physics = particlePhysicsRef.current.get(i)
+          if (!physics) continue
           
-          if (physics) {
-            const currentPos = new THREE.Vector3().fromBufferAttribute(currentPositionAttribute, i)
+          const currentPos = new THREE.Vector3().fromBufferAttribute(currentPositionAttribute, i)
+          
+          // Если есть точка взаимодействия
+          if (interactionPointRef.current && isInteractingRef.current) {
+            // Преобразуем точку взаимодействия в локальные координаты
+            const localInteractionPoint = brainGroup.worldToLocal(interactionPointRef.current.clone())
+            const distance = physics.originalPosition.distanceTo(localInteractionPoint)
             
-            // Применяем силы к скорости
-            physics.velocity.add(physics.force)
-            
-            // Магнитная сила обратно к исходной позиции (когда не взаимодействуем)
-            if (!isInteractingRef.current && physics.isAffected) {
-              const returnForce = physics.originalPosition.clone().sub(currentPos)
-              returnForce.multiplyScalar(MAGNETIC_FORCE)
-              physics.velocity.add(returnForce)
-            }
-            
-            // Применяем трение
-            physics.velocity.multiplyScalar(FRICTION)
-            
-            // Обновляем позицию
-            const newPos = currentPos.clone().add(physics.velocity)
-            currentPositionAttribute.setXYZ(i, newPos.x, newPos.y, newPos.z)
-            
-            // Сбрасываем силу
-            physics.force.set(0, 0, 0)
-            
-            // Проверяем, вернулась ли частица близко к исходной позиции
-            if (!isInteractingRef.current && 
-                newPos.distanceTo(physics.originalPosition) < 0.01 && 
-                physics.velocity.length() < 0.001) {
-              // Возвращаем точно в исходную позицию
-              currentPositionAttribute.setXYZ(i, 
-                physics.originalPosition.x, 
-                physics.originalPosition.y, 
-                physics.originalPosition.z
+            if (distance < INTERACTION_RADIUS) {
+              // Направление от точки взаимодействия
+              const direction = physics.originalPosition.clone().sub(localInteractionPoint)
+              if (direction.lengthSq() > 0) {
+                direction.normalize()
+              } else {
+                direction.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
+              }
+              
+              // Волновой эффект
+              const waveOffset = Math.sin(waveTimeRef.current - distance * WAVE_SPEED) * 0.5 + 0.5
+              const distanceFactor = 1 - (distance / INTERACTION_RADIUS)
+              
+              // Добавляем завихрение на основе скорости мыши
+              const swirl = new THREE.Vector3(
+                -mouseVelocityRef.current.y * SWIRL_STRENGTH,
+                mouseVelocityRef.current.x * SWIRL_STRENGTH,
+                0
               )
-              physics.isAffected = false
-              physics.velocity.set(0, 0, 0)
+              
+              // Комбинируем все силы
+              const force = direction
+                .multiplyScalar(WAVE_STRENGTH * distanceFactor * waveOffset)
+                .add(swirl.multiplyScalar(distanceFactor))
+                .add(physics.turbulence.clone().multiplyScalar(TURBULENCE * waveOffset))
+              
+              physics.velocity.add(force.multiplyScalar(0.1))
             }
-            
-            needsUpdate = true
           }
+          
+          // Магнитная сила возврата
+          const returnForce = physics.originalPosition.clone().sub(currentPos)
+          physics.velocity.add(returnForce.multiplyScalar(MAGNETIC_FORCE))
+          
+          // Применяем трение
+          physics.velocity.multiplyScalar(FRICTION)
+          
+          // Обновляем позицию
+          const newPos = currentPos.add(physics.velocity)
+          currentPositionAttribute.setXYZ(i, newPos.x, newPos.y, newPos.z)
+          
+          // Добавляем небольшое дыхание даже в покое
+          const breathingOffset = Math.sin(Date.now() * 0.001 + physics.wavePhase) * 0.01
+          const breathingPos = newPos.clone().add(
+            physics.originalPosition.clone().normalize().multiplyScalar(breathingOffset)
+          )
+          currentPositionAttribute.setXYZ(i, breathingPos.x, breathingPos.y, breathingPos.z)
+          
+          needsUpdate = true
         }
         
         if (needsUpdate) {
           currentPositionAttribute.needsUpdate = true
+          brainMesh.geometry.computeBoundingSphere()
         }
       }
 
@@ -348,12 +372,13 @@ const App: React.FC = () => {
       if (currentMount && renderer.domElement) {
         currentMount.removeChild(renderer.domElement)
       }
-      // Удаляем события с canvas
-      const canvas = renderer.domElement
-      canvas.removeEventListener('mousedown', onMouseDown)
-      canvas.removeEventListener('mouseup', onMouseUp)
-      canvas.removeEventListener('touchstart', onTouchStart)
-      canvas.removeEventListener('touchend', onTouchEnd)
+      currentMount.removeEventListener('mousedown', onMouseDown)
+      currentMount.removeEventListener('mousemove', onMouseMove)
+      currentMount.removeEventListener('mouseup', onMouseUp)
+      currentMount.removeEventListener('mouseleave', handleInteractionEnd)
+      currentMount.removeEventListener('touchstart', onTouchStart)
+      currentMount.removeEventListener('touchmove', onTouchMove)
+      currentMount.removeEventListener('touchend', onTouchEnd)
       window.removeEventListener('resize', handleResize)
       window.removeEventListener('resize', checkIsMobile)
       renderer.dispose()
@@ -367,8 +392,9 @@ const App: React.FC = () => {
         style={{ 
           width: '100%', 
           height: '100%',
-          touchAction: 'none', // Предотвращаем стандартные touch действия
-          userSelect: 'none' // Предотвращаем выделение текста
+          touchAction: 'none',
+          userSelect: 'none',
+          cursor: isInteractingRef.current ? 'grabbing' : 'grab'
         }} 
       />
       
