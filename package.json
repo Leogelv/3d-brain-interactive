@@ -1,0 +1,31 @@
+{
+  "name": "3d-brain-interactive",
+  "version": "1.0.0",
+  "description": "Interactive 3D brain visualization with particle effects using Three.js and React",
+  "main": "index.html",
+  "scripts": {
+    "dev": "python3 -m http.server 3000 || python -m http.server 3000",
+    "serve": "python3 -m http.server 3000 || python -m http.server 3000",
+    "preview": "python3 -m http.server 3000 || python -m http.server 3000"
+  },
+  "keywords": [
+    "three.js",
+    "react",
+    "3d",
+    "brain",
+    "interactive",
+    "visualization",
+    "particles",
+    "webgl"
+  ],
+  "author": "Leonid Gelvi <leogelv@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Leogelv/3d-brain-interactive.git"
+  },
+  "homepage": "https://github.com/Leogelv/3d-brain-interactive#readme",
+  "bugs": {
+    "url": "https://github.com/Leogelv/3d-brain-interactive/issues"
+  }
+}
