@@ -1,20 +1,30 @@
 {
   "name": "3d-brain-interactive",
   "version": "1.0.0",
+  "type": "module",
   "description": "Interactive 3D brain visualization with particle effects using Three.js and React",
-  "main": "index.html",
+  "main": "src/main.tsx",
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
-    "dev": "npx serve -s . -l 3000",
-    "serve": "npx serve -s . -l 3000",
-    "preview": "npx serve -s . -l 3000",
-    "build": "echo 'No build step needed for static site'",
-    "start": "npx serve -s . -l ${PORT:-3000}"
+    "dev": "vite --port 8080",
+    "build": "tsc && vite build",
+    "preview": "vite preview --port 8080",
+    "start": "vite preview --port 8080 --host 0.0.0.0"
   },
   "dependencies": {
-    "serve": "^14.2.1"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "three": "^0.165.0",
+    "@types/three": "^0.165.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.0.2",
+    "vite": "^5.0.0"
   },
   "keywords": [
     "three.js",
