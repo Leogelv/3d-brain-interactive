@@ -3,10 +3,11 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 
 // Физические константы
-const MOUSE_INFLUENCE_RADIUS = 150 // радиус влияния в пикселях
-const FORCE_MULTIPLIER = 0.5
-const DAMPING = 0.92
-const RETURN_FORCE = 0.08
+const MOUSE_INFLUENCE_RADIUS = 120 // радиус влияния в пикселях
+const FORCE_MULTIPLIER = 0.3
+const DAMPING = 0.94
+const RETURN_FORCE = 0.05
+const PARTICLE_SIZE = 0.02
 
 interface Particle {
   originalPos: THREE.Vector3
@@ -26,10 +27,11 @@ const App: React.FC = () => {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
   const animationIdRef = useRef<number | null>(null)
-  const brainMeshRef = useRef<THREE.Mesh | null>(null)
+  const pointsRef = useRef<THREE.Points | null>(null)
   const particlesRef = useRef<Particle[]>([])
   const mouseRef = useRef({ x: 0, y: 0, isDown: false })
   const previousMouseRef = useRef({ x: 0, y: 0 })
+  const rotationRef = useRef(0)
 
   const loadModel = async () => {
     if (!sceneRef.current || !cameraRef.current) return
@@ -44,55 +46,98 @@ const App: React.FC = () => {
       })
       
       const modelGroup = gltf.scene
-      let meshFound = false
+      let vertices: Float32Array | null = null
+      let totalVertices = 0
 
+      // Собираем все вершины из всех мешей
       modelGroup.traverse((child: any) => {
-        if (child.isMesh && !meshFound) {
-          meshFound = true
-          brainMeshRef.current = child
-          
-          // Инициализируем частицы из вершин
+        if (child.isMesh) {
           const positions = child.geometry.attributes.position
-          const particles: Particle[] = []
-          
-          for (let i = 0; i < positions.count; i++) {
-            const x = positions.getX(i)
-            const y = positions.getY(i)
-            const z = positions.getZ(i)
-            
-            particles.push({
-              originalPos: new THREE.Vector3(x, y, z),
-              currentPos: new THREE.Vector3(x, y, z),
-              velocity: new THREE.Vector3(0, 0, 0),
-              screenPos: new THREE.Vector2(0, 0),
-              force: new THREE.Vector3(0, 0, 0)
-            })
+          if (!vertices) {
+            totalVertices = positions.count
+            vertices = new Float32Array(positions.array)
+          } else {
+            // Если есть несколько мешей, объединяем их вершины
+            const newVertices = new Float32Array(totalVertices + positions.count * 3)
+            newVertices.set(vertices)
+            newVertices.set(positions.array, totalVertices * 3)
+            vertices = newVertices
+            totalVertices += positions.count
           }
-          
-          particlesRef.current = particles
         }
       })
 
-      if (brainMeshRef.current) {
-        const box = new THREE.Box3().setFromObject(modelGroup)
+      if (vertices && totalVertices > 0) {
+        // Создаем геометрию для частиц
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
+        
+        // Создаем цвета для частиц (градиент от голубого к розовому)
+        const colors = new Float32Array(totalVertices * 3)
+        for (let i = 0; i < totalVertices; i++) {
+          const t = i / totalVertices
+          colors[i * 3] = 0.5 + t * 0.5     // R
+          colors[i * 3 + 1] = 0.2 + t * 0.3 // G
+          colors[i * 3 + 2] = 0.8 + t * 0.2 // B
+        }
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+
+        // Материал для частиц
+        const material = new THREE.PointsMaterial({
+          size: PARTICLE_SIZE,
+          vertexColors: true,
+          blending: THREE.AdditiveBlending,
+          transparent: true,
+          opacity: 0.8,
+          sizeAttenuation: true
+        })
+
+        // Создаем систему частиц
+        const points = new THREE.Points(geometry, material)
+        pointsRef.current = points
+
+        // Центрируем модель
+        geometry.computeBoundingBox()
+        const box = geometry.boundingBox!
         const center = box.getCenter(new THREE.Vector3())
-        modelGroup.position.sub(center)
+        geometry.translate(-center.x, -center.y, -center.z)
 
         // Позиционирование для мобильных
         if (isMobile) {
-          modelGroup.position.y = 0.3
+          points.position.y = 0.3
         }
 
-        sceneRef.current.add(modelGroup)
+        sceneRef.current.add(points)
+
+        // Инициализируем физику частиц
+        const particles: Particle[] = []
+        const positions = geometry.attributes.position
         
+        for (let i = 0; i < positions.count; i++) {
+          const x = positions.getX(i)
+          const y = positions.getY(i)
+          const z = positions.getZ(i)
+          
+          particles.push({
+            originalPos: new THREE.Vector3(x, y, z),
+            currentPos: new THREE.Vector3(x, y, z),
+            velocity: new THREE.Vector3(0, 0, 0),
+            screenPos: new THREE.Vector2(0, 0),
+            force: new THREE.Vector3(0, 0, 0)
+          })
+        }
+        
+        particlesRef.current = particles
+
+        // Настраиваем камеру
         const size = box.getSize(new THREE.Vector3())
         const maxDim = Math.max(size.x, size.y, size.z)
         const fov = cameraRef.current.fov * (Math.PI / 180)
         let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2))
-        cameraZ *= 1.8
+        cameraZ *= 1.5
         cameraRef.current.position.set(0, 0, cameraZ)
       } else {
-        throw new Error("Не удалось найти 3D-модель в файле.")
+        throw new Error("Не удалось найти вершины в 3D-модели.")
       }
       
       setIsLoading(false)
@@ -119,7 +164,7 @@ const App: React.FC = () => {
     const currentMount = mountRef.current
 
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0xf5f5f5)
+    scene.background = new THREE.Color(0x0a0a0a)
     sceneRef.current = scene
 
     const camera = new THREE.PerspectiveCamera(75, currentMount.clientWidth / currentMount.clientHeight, 0.1, 1000)
@@ -133,7 +178,7 @@ const App: React.FC = () => {
     currentMount.appendChild(renderer.domElement)
     rendererRef.current = renderer
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 1.5)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
     scene.add(ambientLight)
     
     // Обработчики событий
@@ -192,16 +237,15 @@ const App: React.FC = () => {
     const animate = () => {
       animationIdRef.current = requestAnimationFrame(animate)
       
-      const brainGroup = scene.children.find(child => child.type === 'Group')
-      const brainMesh = brainMeshRef.current
-
-      if (brainGroup) {
-        brainGroup.rotation.y += 0.003
+      // Вращение системы частиц
+      if (pointsRef.current) {
+        rotationRef.current += 0.003
+        pointsRef.current.rotation.y = rotationRef.current
       }
 
-      if (brainMesh && particlesRef.current.length > 0 && cameraRef.current) {
-        const positions = brainMesh.geometry.attributes.position
-        const matrixWorld = brainMesh.matrixWorld
+      if (pointsRef.current && particlesRef.current.length > 0 && cameraRef.current) {
+        const positions = pointsRef.current.geometry.attributes.position
+        const matrixWorld = pointsRef.current.matrixWorld
         
         // Вычисляем скорость движения мыши
         const mouseVelocity = {
@@ -238,18 +282,18 @@ const App: React.FC = () => {
             if (mouseRef.current.isDown) {
               // При нажатии - отталкиваем частицы
               const angle = Math.atan2(dy, dx)
-              particle.force.x += Math.cos(angle) * force * 2
-              particle.force.y += Math.sin(angle) * force * 2
-              particle.force.z += (Math.random() - 0.5) * force
+              particle.force.x += Math.cos(angle) * force * 3
+              particle.force.y += Math.sin(angle) * force * 3
+              particle.force.z += (Math.random() - 0.5) * force * 2
               
               // Добавляем влияние скорости мыши
-              particle.force.x += mouseVelocity.x * influence * 0.1
-              particle.force.y += mouseVelocity.y * influence * 0.1
+              particle.force.x += mouseVelocity.x * influence * 0.2
+              particle.force.y += mouseVelocity.y * influence * 0.2
             } else {
               // При наведении - легкое волнение
-              particle.force.x += (Math.random() - 0.5) * force * 0.3
-              particle.force.y += (Math.random() - 0.5) * force * 0.3
-              particle.force.z += (Math.random() - 0.5) * force * 0.3
+              particle.force.x += (Math.random() - 0.5) * force * 0.5
+              particle.force.y += (Math.random() - 0.5) * force * 0.5
+              particle.force.z += (Math.random() - 0.5) * force * 0.5
             }
           }
           
@@ -316,7 +360,7 @@ const App: React.FC = () => {
   }, [isMobile])
 
   return (
-    <div style={{ position: 'relative', width: '100vw', height: '100vh', backgroundColor: '#f5f5f5' }}>
+    <div style={{ position: 'relative', width: '100vw', height: '100vh', backgroundColor: '#0a0a0a' }}>
       <div 
         ref={mountRef} 
         style={{ 
@@ -335,7 +379,7 @@ const App: React.FC = () => {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: 'rgba(245, 245, 245, 0.9)'
+          backgroundColor: 'rgba(10, 10, 10, 0.9)'
         }}>
           <div style={{ textAlign: 'center' }}>
             <div style={{
@@ -347,7 +391,7 @@ const App: React.FC = () => {
               animation: 'spin 1s linear infinite',
               margin: '0 auto 16px'
             }} />
-            <p style={{ color: '#6b7280', fontWeight: 500 }}>Загрузка модели мозга...</p>
+            <p style={{ color: '#e5e5e5', fontWeight: 500 }}>Загрузка модели мозга...</p>
           </div>
         </div>
       )}
@@ -359,12 +403,12 @@ const App: React.FC = () => {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: 'rgba(245, 245, 245, 0.9)'
+          backgroundColor: 'rgba(10, 10, 10, 0.9)'
         }}>
           <div style={{ textAlign: 'center', maxWidth: '384px', padding: '0 24px' }}>
             <div style={{ color: '#ef4444', marginBottom: '16px', fontSize: '24px' }}>⚠️</div>
-            <h3 style={{ fontSize: '18px', fontWeight: 600, color: '#1f2937', marginBottom: '8px' }}>Ошибка загрузки</h3>
-            <p style={{ color: '#6b7280', fontSize: '14px' }}>{loadingError}</p>
+            <h3 style={{ fontSize: '18px', fontWeight: 600, color: '#f5f5f5', marginBottom: '8px' }}>Ошибка загрузки</h3>
+            <p style={{ color: '#a3a3a3', fontSize: '14px' }}>{loadingError}</p>
             <button 
               onClick={() => window.location.reload()} 
               style={{
@@ -397,7 +441,7 @@ const App: React.FC = () => {
           pointerEvents: 'none'
         }}>
           <p style={{
-            color: '#6b7280',
+            color: '#e5e5e5',
             fontWeight: 500,
             fontSize: isMobile ? '16px' : '18px',
             letterSpacing: '0.025em',
