@@ -11,7 +11,8 @@
     "dev": "vite --port 8080",
     "build": "tsc && vite build",
     "preview": "vite preview --port 8080 --host 0.0.0.0",
-    "start": "npx serve -s dist -l 8080"
+    "start": "npx serve -s dist -l 8080",
+    "postinstall": "node -e \"console.log('Dependencies installed successfully')\""
   },
   "dependencies": {
     "react": "^18.2.0",
