@@ -1,6 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react'
 import * as THREE from 'three'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 
 // Параметры физики
 const WAVE_STRENGTH = 3.0
@@ -24,13 +23,14 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [loadingError, setLoadingError] = useState<string | null>(null)
   const [isMobile, setIsMobile] = useState(false)
+  const [loadingProgress, setLoadingProgress] = useState(0)
 
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
   const animationIdRef = useRef<number | null>(null)
-  const brainMeshRef = useRef<THREE.Mesh | null>(null)
-  const originalPositionsRef = useRef<THREE.BufferAttribute | null>(null)
+  const pointsRef = useRef<THREE.Points | null>(null)
+  const originalPositionsRef = useRef<Float32Array | null>(null)
   const particlePhysicsRef = useRef<Map<number, ParticlePhysics>>(new Map())
   
   // Состояние взаимодействия
@@ -43,7 +43,7 @@ const App: React.FC = () => {
 
   // Функция для получения 3D позиции из экранных координат
   const getWorldPosition = (clientX: number, clientY: number): THREE.Vector3 | null => {
-    if (!mountRef.current || !cameraRef.current || !brainMeshRef.current) return null
+    if (!mountRef.current || !cameraRef.current || !pointsRef.current) return null
     
     const rect = mountRef.current.getBoundingClientRect()
     const mouse = new THREE.Vector2()
@@ -51,15 +51,16 @@ const App: React.FC = () => {
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1
     
     const raycaster = new THREE.Raycaster()
+    raycaster.params.Points.threshold = 0.1
     raycaster.setFromCamera(mouse, cameraRef.current)
     
-    const intersects = raycaster.intersectObject(brainMeshRef.current)
+    const intersects = raycaster.intersectObject(pointsRef.current)
     
     if (intersects.length > 0) {
       return intersects[0].point
     }
     
-    // Если не попали в мозг, проецируем на плоскость
+    // Если не попали в точки, проецируем на плоскость
     const planeNormal = new THREE.Vector3(0, 0, 1)
     const planePoint = new THREE.Vector3(0, 0, 0)
     const plane = new THREE.Plane(planeNormal, -planePoint.dot(planeNormal))
@@ -107,69 +108,129 @@ const App: React.FC = () => {
     mouseVelocityRef.current.set(0, 0)
   }
 
-  const loadModel = async () => {
+  const loadVertices = async () => {
     if (!sceneRef.current || !cameraRef.current) return
     
     setIsLoading(true)
     setLoadingError(null)
+    setLoadingProgress(0)
 
     try {
-      const loader = new GLTFLoader()
-      const gltf = await new Promise<any>((resolve, reject) => {
-        loader.load('/brain_hologram.glb', resolve, undefined, reject)
+      // Загружаем vertices.json
+      const response = await fetch('/vertices.json')
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+      
+      const reader = response.body?.getReader()
+      const contentLength = +response.headers.get('Content-Length')!
+      
+      let receivedLength = 0
+      const chunks: Uint8Array[] = []
+      
+      while(true) {
+        const {done, value} = await reader!.read()
+        
+        if (done) break
+        
+        chunks.push(value)
+        receivedLength += value.length
+        
+        if (contentLength) {
+          setLoadingProgress(Math.round((receivedLength / contentLength) * 100))
+        }
+      }
+      
+      const chunksAll = new Uint8Array(receivedLength)
+      let position = 0
+      for(let chunk of chunks) {
+        chunksAll.set(chunk, position)
+        position += chunk.length
+      }
+      
+      const text = new TextDecoder("utf-8").decode(chunksAll)
+      const vertices: number[][] = JSON.parse(text)
+      
+      // Создаем геометрию для точек
+      const geometry = new THREE.BufferGeometry()
+      const positions = new Float32Array(vertices.length * 3)
+      const colors = new Float32Array(vertices.length * 3)
+      
+      // Заполняем позиции и цвета
+      for (let i = 0; i < vertices.length; i++) {
+        positions[i * 3] = vertices[i][0]
+        positions[i * 3 + 1] = vertices[i][1]
+        positions[i * 3 + 2] = vertices[i][2]
+        
+        // Цвет на основе позиции для визуального эффекта
+        colors[i * 3] = 0.5 + vertices[i][0] * 0.5
+        colors[i * 3 + 1] = 0.5 + vertices[i][1] * 0.5
+        colors[i * 3 + 2] = 0.8
+      }
+      
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+      
+      // Сохраняем оригинальные позиции
+      originalPositionsRef.current = positions.slice()
+      
+      // Инициализируем физику для каждой частицы
+      for (let i = 0; i < vertices.length; i++) {
+        const originalPos = new THREE.Vector3(
+          vertices[i][0],
+          vertices[i][1],
+          vertices[i][2]
+        )
+        particlePhysicsRef.current.set(i, {
+          velocity: new THREE.Vector3(),
+          originalPosition: originalPos.clone(),
+          offset: new THREE.Vector3(),
+          wavePhase: Math.random() * Math.PI * 2,
+          turbulence: new THREE.Vector3(
+            (Math.random() - 0.5) * 0.1,
+            (Math.random() - 0.5) * 0.1,
+            (Math.random() - 0.5) * 0.1
+          )
+        })
+      }
+      
+      // Создаем материал для точек
+      const material = new THREE.PointsMaterial({
+        size: 0.002,
+        vertexColors: true,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        opacity: 0.8
       })
       
-      const modelGroup = gltf.scene
-
-      modelGroup.traverse((child: any) => {
-        if (child.isMesh) {
-          if (!brainMeshRef.current) {
-            brainMeshRef.current = child
-            originalPositionsRef.current = child.geometry.attributes.position.clone()
-            
-            // Инициализируем физику для каждой частицы
-            for (let i = 0; i < originalPositionsRef.current!.count; i++) {
-              const originalPos = new THREE.Vector3().fromBufferAttribute(originalPositionsRef.current!, i)
-              particlePhysicsRef.current.set(i, {
-                velocity: new THREE.Vector3(),
-                originalPosition: originalPos.clone(),
-                offset: new THREE.Vector3(),
-                wavePhase: Math.random() * Math.PI * 2,
-                turbulence: new THREE.Vector3(
-                  (Math.random() - 0.5) * 0.1,
-                  (Math.random() - 0.5) * 0.1,
-                  (Math.random() - 0.5) * 0.1
-                )
-              })
-            }
-          }
-        }
-      })
-
-      if (brainMeshRef.current) {
-        const box = new THREE.Box3().setFromObject(modelGroup)
-        const center = box.getCenter(new THREE.Vector3())
-        modelGroup.position.sub(center)
-
-        if (isMobile) {
-          modelGroup.position.y = 0.3
-        }
-
-        sceneRef.current.add(modelGroup)
-        
-        const size = box.getSize(new THREE.Vector3())
-        const maxDim = Math.max(size.x, size.y, size.z)
-        const fov = cameraRef.current.fov * (Math.PI / 180)
-        let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2))
-        cameraZ *= 1.8
-        cameraRef.current.position.set(0, 0, cameraZ)
-      } else {
-        throw new Error("Не удалось найти 3D-модель в файле.")
+      // Создаем объект Points
+      const points = new THREE.Points(geometry, material)
+      pointsRef.current = points
+      
+      // Центрируем и масштабируем
+      geometry.computeBoundingBox()
+      const box = geometry.boundingBox!
+      const center = box.getCenter(new THREE.Vector3())
+      points.position.sub(center)
+      
+      if (isMobile) {
+        points.position.y = 0.3
       }
+      
+      sceneRef.current.add(points)
+      
+      // Настраиваем камеру
+      const size = box.getSize(new THREE.Vector3())
+      const maxDim = Math.max(size.x, size.y, size.z)
+      const fov = cameraRef.current.fov * (Math.PI / 180)
+      let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2))
+      cameraZ *= 1.8
+      cameraRef.current.position.set(0, 0, cameraZ)
       
       setIsLoading(false)
     } catch (error) {
-      console.error('Ошибка загрузки модели:', error)
+      console.error('Ошибка загрузки вершин:', error)
       setLoadingError(`Ошибка загрузки: ${(error as Error).message}`)
       setIsLoading(false)
     }
@@ -257,15 +318,14 @@ const App: React.FC = () => {
     const animate = () => {
       animationIdRef.current = requestAnimationFrame(animate)
       
-      const brainGroup = scene.children.find(child => child.type === 'Group')
-      const brainMesh = brainMeshRef.current
+      const points = pointsRef.current
 
-      if (brainGroup) {
-        brainGroup.rotation.y += 0.003
+      if (points) {
+        points.rotation.y += 0.003
       }
 
-      if (brainMesh && originalPositionsRef.current && brainGroup) {
-        const currentPositionAttribute = brainMesh.geometry.attributes.position
+      if (points && originalPositionsRef.current) {
+        const positions = points.geometry.attributes.position.array as Float32Array
         let needsUpdate = false
         
         // Увеличиваем время волны
@@ -274,16 +334,21 @@ const App: React.FC = () => {
         }
         
         // Обновляем физику каждой частицы
-        for (let i = 0; i < currentPositionAttribute.count; i++) {
+        const particleCount = positions.length / 3
+        for (let i = 0; i < particleCount; i++) {
           const physics = particlePhysicsRef.current.get(i)
           if (!physics) continue
           
-          const currentPos = new THREE.Vector3().fromBufferAttribute(currentPositionAttribute, i)
+          const currentPos = new THREE.Vector3(
+            positions[i * 3],
+            positions[i * 3 + 1],
+            positions[i * 3 + 2]
+          )
           
           // Если есть точка взаимодействия
           if (interactionPointRef.current && isInteractingRef.current) {
             // Преобразуем точку взаимодействия в локальные координаты
-            const localInteractionPoint = brainGroup.worldToLocal(interactionPointRef.current.clone())
+            const localInteractionPoint = points.worldToLocal(interactionPointRef.current.clone())
             const distance = physics.originalPosition.distanceTo(localInteractionPoint)
             
             if (distance < INTERACTION_RADIUS) {
@@ -325,28 +390,29 @@ const App: React.FC = () => {
           
           // Обновляем позицию
           const newPos = currentPos.add(physics.velocity)
-          currentPositionAttribute.setXYZ(i, newPos.x, newPos.y, newPos.z)
           
           // Добавляем небольшое дыхание даже в покое
           const breathingOffset = Math.sin(Date.now() * 0.001 + physics.wavePhase) * 0.01
           const breathingPos = newPos.clone().add(
             physics.originalPosition.clone().normalize().multiplyScalar(breathingOffset)
           )
-          currentPositionAttribute.setXYZ(i, breathingPos.x, breathingPos.y, breathingPos.z)
+          
+          positions[i * 3] = breathingPos.x
+          positions[i * 3 + 1] = breathingPos.y
+          positions[i * 3 + 2] = breathingPos.z
           
           needsUpdate = true
         }
         
         if (needsUpdate) {
-          currentPositionAttribute.needsUpdate = true
-          brainMesh.geometry.computeBoundingSphere()
+          points.geometry.attributes.position.needsUpdate = true
         }
       }
 
       renderer.render(scene, camera)
     }
 
-    loadModel()
+    loadVertices()
     animate()
 
     const handleResize = () => {
@@ -417,7 +483,9 @@ const App: React.FC = () => {
               animation: 'spin 1s linear infinite',
               margin: '0 auto 16px'
             }} />
-            <p style={{ color: '#6b7280', fontWeight: 500 }}>Загрузка модели мозга...</p>
+            <p style={{ color: '#6b7280', fontWeight: 500 }}>
+              Загрузка точек мозга... {loadingProgress > 0 && `${loadingProgress}%`}
+            </p>
           </div>
         </div>
       )}
