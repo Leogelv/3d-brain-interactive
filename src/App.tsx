@@ -46,36 +46,34 @@ const App: React.FC = () => {
       })
       
       const modelGroup = gltf.scene
-      let vertices: Float32Array | null = null
-      let totalVertices = 0
+      const allVertices: number[] = []
 
       // Собираем все вершины из всех мешей
       modelGroup.traverse((child: any) => {
-        if (child.isMesh) {
+        if (child.isMesh && child.geometry && child.geometry.attributes.position) {
           const positions = child.geometry.attributes.position
-          if (!vertices) {
-            totalVertices = positions.count
-            vertices = new Float32Array(positions.array)
-          } else {
-            // Если есть несколько мешей, объединяем их вершины
-            const newVertices = new Float32Array(totalVertices + positions.count * 3)
-            newVertices.set(vertices)
-            newVertices.set(positions.array, totalVertices * 3)
-            vertices = newVertices
-            totalVertices += positions.count
+          const array = positions.array
+          
+          // Добавляем вершины в общий массив
+          for (let i = 0; i < array.length; i++) {
+            allVertices.push(array[i])
           }
         }
       })
 
-      if (vertices && totalVertices > 0) {
+      if (allVertices.length > 0) {
+        // Создаем Float32Array из собранных вершин
+        const vertices = new Float32Array(allVertices)
+        const vertexCount = vertices.length / 3
+
         // Создаем геометрию для частиц
         const geometry = new THREE.BufferGeometry()
         geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
         
         // Создаем цвета для частиц (градиент от голубого к розовому)
-        const colors = new Float32Array(totalVertices * 3)
-        for (let i = 0; i < totalVertices; i++) {
-          const t = i / totalVertices
+        const colors = new Float32Array(vertexCount * 3)
+        for (let i = 0; i < vertexCount; i++) {
+          const t = i / vertexCount
           colors[i * 3] = 0.5 + t * 0.5     // R
           colors[i * 3 + 1] = 0.2 + t * 0.3 // G
           colors[i * 3 + 2] = 0.8 + t * 0.2 // B
@@ -111,12 +109,12 @@ const App: React.FC = () => {
 
         // Инициализируем физику частиц
         const particles: Particle[] = []
-        const positions = geometry.attributes.position
+        const positionAttribute = geometry.attributes.position
         
-        for (let i = 0; i < positions.count; i++) {
-          const x = positions.getX(i)
-          const y = positions.getY(i)
-          const z = positions.getZ(i)
+        for (let i = 0; i < vertexCount; i++) {
+          const x = positionAttribute.getX(i)
+          const y = positionAttribute.getY(i)
+          const z = positionAttribute.getZ(i)
           
           particles.push({
             originalPos: new THREE.Vector3(x, y, z),
@@ -244,8 +242,12 @@ const App: React.FC = () => {
       }
 
       if (pointsRef.current && particlesRef.current.length > 0 && cameraRef.current) {
-        const positions = pointsRef.current.geometry.attributes.position
+        const geometry = pointsRef.current.geometry
+        const positions = geometry.attributes.position
         const matrixWorld = pointsRef.current.matrixWorld
+        
+        // Проверяем, что количество частиц соответствует количеству позиций
+        const particleCount = Math.min(particlesRef.current.length, positions.count)
         
         // Вычисляем скорость движения мыши
         const mouseVelocity = {
@@ -254,7 +256,7 @@ const App: React.FC = () => {
         }
         
         // Обновляем экранные позиции и физику частиц
-        for (let i = 0; i < particlesRef.current.length; i++) {
+        for (let i = 0; i < particleCount; i++) {
           const particle = particlesRef.current[i]
           
           // Получаем мировые координаты частицы
